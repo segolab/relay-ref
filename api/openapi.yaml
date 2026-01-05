@@ -1,0 +1,335 @@
+openapi: 3.0.3
+info:
+  title: Relay API
+  version: 1.0.0
+  description: >
+    A rate-limited relay (message/notification enqueue) API.
+    Designed as a baseline for comparing Go and .NET implementations,
+    rate-limiting strategies, and client retry behavior.
+
+servers:
+  - url: http://localhost:8080
+
+tags:
+  - name: Relays
+  - name: System
+
+security:
+  - ApiKeyAuth: []
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 128
+      description: Client-provided correlation/request id.
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        maxLength: 128
+      description: >
+        Idempotency key for safely retrying POST requests.
+
+    PageSize:
+      name: pageSize
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+
+    PageToken:
+      name: pageToken
+      in: query
+      required: false
+      schema:
+        type: string
+
+  headers:
+    RateLimitLimit:
+      description: Total requests allowed in the current window.
+      schema:
+        type: integer
+
+    RateLimitRemaining:
+      description: Remaining requests in the current window.
+      schema:
+        type: integer
+
+    RateLimitReset:
+      description: Seconds until the rate limit window resets.
+      schema:
+        type: integer
+
+  schemas:
+    RelayStatus:
+      type: string
+      enum:
+        - queued
+        - delivered
+        - failed
+
+    Destination:
+      type: object
+      required: [type, url]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum: [webhook]
+          description: Destination type (extensible in future).
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+
+    CreateRelayRequest:
+      type: object
+      required: [eventType, destination, payload]
+      additionalProperties: false
+      properties:
+        eventType:
+          type: string
+          maxLength: 128
+          description: Logical event name (e.g. order.created).
+        destination:
+          $ref: "#/components/schemas/Destination"
+        payload:
+          type: object
+          description: >
+            Small JSON payload to be relayed.
+            Size limits are enforced by the server.
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Optional client-provided metadata.
+
+    Relay:
+      type: object
+      required:
+        - id
+        - eventType
+        - destination
+        - payload
+        - status
+        - createdAt
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        eventType:
+          type: string
+        destination:
+          $ref: "#/components/schemas/Destination"
+        payload:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          nullable: true
+        status:
+          $ref: "#/components/schemas/RelayStatus"
+        createdAt:
+          type: string
+          format: date-time
+        deliveredAt:
+          type: string
+          format: date-time
+          nullable: true
+        failureReason:
+          type: string
+          nullable: true
+
+    ListRelaysResponse:
+      type: object
+      required: [items]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Relay"
+        nextPageToken:
+          type: string
+          nullable: true
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+          example: rate_limited
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
+        requestId:
+          type: string
+          nullable: true
+
+  responses:
+    RateLimited:
+      description: Too many requests.
+      headers:
+        RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        RateLimit-Reset:
+          $ref: "#/components/headers/RateLimitReset"
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+paths:
+  /healthz:
+    get:
+      tags: [System]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: OK
+
+  /readyz:
+    get:
+      tags: [System]
+      summary: Readiness probe
+      security: []
+      responses:
+        "200":
+          description: OK
+
+  /v1/relays:
+    post:
+      tags: [Relays]
+      summary: Enqueue a relay (message/notification)
+      operationId: createRelay
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRelayRequest"
+      responses:
+        "201":
+          description: Created
+          headers:
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Relay"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+    get:
+      tags: [Relays]
+      summary: List relays (paged)
+      operationId: listRelays
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: OK
+          headers:
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListRelaysResponse"
+        "401":
+          description: Unauthorized
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/relays/{id}:
+    get:
+      tags: [Relays]
+      summary: Get relay by id
+      operationId: getRelay
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: OK
+          headers:
+            RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+            RateLimit-Reset:
+              $ref: "#/components/headers/RateLimitReset"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Relay"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Unauthorized
+        "429":
+          $ref: "#/components/responses/RateLimited"
