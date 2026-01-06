@@ -1,0 +1,10 @@
+{
+  "eventType": "smoke.test",
+  "destination": {
+    "type": "webhook",
+    "url": "https://example.com/webhook"
+  },
+  "payload": {
+    "hello": "world"
+  }
+}
